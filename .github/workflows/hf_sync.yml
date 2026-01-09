@@ -1,0 +1,142 @@
+name: Sync WebX Artifact to Hugging Face
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  HF_REPO_ID: "MatverseHub/WebX"
+  HF_REPO_TYPE: "dataset"
+  ARTIFACT_NAME: "webx-fullstack.zip"
+  ARTIFACT_DIR: "artifacts"
+  HASH_NAME: "webx-fullstack.sha256"
+  SIG_NAME: "webx-fullstack.sig"
+
+jobs:
+  build-and-sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Prepare artifact
+        env:
+          HF_SIGNING_KEY: ${{ secrets.HF_SIGNING_KEY }}
+        run: |
+          mkdir -p "$ARTIFACT_DIR"
+          zip -r "$ARTIFACT_DIR/$ARTIFACT_NAME" . \
+            -x ".git/*" \
+            -x "$ARTIFACT_DIR/*"
+          sha256sum "$ARTIFACT_DIR/$ARTIFACT_NAME" > "$ARTIFACT_DIR/$HASH_NAME"
+          if [ -z "${HF_SIGNING_KEY:-}" ]; then
+            echo "HF_SIGNING_KEY is required for signature generation."
+            exit 1
+          fi
+          openssl dgst -sha256 -hmac "$HF_SIGNING_KEY" \
+            "$ARTIFACT_DIR/$ARTIFACT_NAME" | awk '{print $2}' > "$ARTIFACT_DIR/$SIG_NAME"
+
+      - name: Install Hugging Face Hub
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --upgrade huggingface_hub
+
+      - name: Validate dataset token
+        env:
+          HF_DATASET_TOKEN: ${{ secrets.HF_DATASET_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+
+          token = os.environ.get("HF_DATASET_TOKEN")
+          if not token:
+              raise SystemExit("HF_DATASET_TOKEN is required for dataset sync.")
+
+          repo_id = os.environ["HF_REPO_ID"]
+          repo_type = os.environ["HF_REPO_TYPE"]
+          api = HfApi(token=token)
+          me = api.whoami()
+          print(f"Dataset token user: {me.get('name') or me.get('user') or me}")
+          info = api.repo_info(repo_id=repo_id, repo_type=repo_type)
+          print(f"Dataset repo exists: {info.repo_id}")
+          PY
+
+      - name: Upload artifact to Hugging Face
+        env:
+          HF_DATASET_TOKEN: ${{ secrets.HF_DATASET_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+
+          token = os.environ["HF_DATASET_TOKEN"]
+          repo_id = os.environ["HF_REPO_ID"]
+          repo_type = os.environ["HF_REPO_TYPE"]
+          artifact_dir = os.environ["ARTIFACT_DIR"]
+          artifact_name = os.environ["ARTIFACT_NAME"]
+          hash_name = os.environ["HASH_NAME"]
+          sig_name = os.environ["SIG_NAME"]
+
+          api = HfApi(token=token)
+          artifact_path = f"{artifact_dir}/{artifact_name}"
+          api.upload_file(
+              path_or_fileobj=artifact_path,
+              path_in_repo=f"artifacts/{artifact_name}",
+              repo_id=repo_id,
+              repo_type=repo_type,
+              commit_message=f"CI sync: add {artifact_name}",
+          )
+          api.upload_file(
+              path_or_fileobj=f"{artifact_dir}/{hash_name}",
+              path_in_repo=f"artifacts/{hash_name}",
+              repo_id=repo_id,
+              repo_type=repo_type,
+              commit_message=f"CI sync: add {hash_name}",
+          )
+          api.upload_file(
+              path_or_fileobj=f"{artifact_dir}/{sig_name}",
+              path_in_repo=f"artifacts/{sig_name}",
+              repo_id=repo_id,
+              repo_type=repo_type,
+              commit_message=f"CI sync: add {sig_name}",
+          )
+          print(f"Uploaded {artifact_path} and integrity files to {repo_id}")
+          PY
+
+      - name: List Hugging Face files
+        env:
+          HF_DATASET_TOKEN: ${{ secrets.HF_DATASET_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+
+          api = HfApi(token=os.environ["HF_DATASET_TOKEN"])
+          files = api.list_repo_files(
+              repo_id=os.environ["HF_REPO_ID"],
+              repo_type=os.environ["HF_REPO_TYPE"],
+          )
+          print("Files in dataset:")
+          for path in files:
+              print(f" - {path}")
+          PY
+
+      - name: Validate space token (optional)
+        if: ${{ secrets.HF_SPACE_TOKEN != '' }}
+        env:
+          HF_SPACE_TOKEN: ${{ secrets.HF_SPACE_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+
+          token = os.environ["HF_SPACE_TOKEN"]
+          api = HfApi(token=token)
+          me = api.whoami()
+          print(f"Space token user: {me.get('name') or me.get('user') or me}")
+          PY
